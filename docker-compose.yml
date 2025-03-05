@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - ./credentials:/app/credentials
+    env_file:
+      - .env
+    restart: always
+    command: gunicorn --bind 0.0.0.0:5000 run:app
+    networks:
+      - jobify-network
+
+networks:
+  jobify-network:
+    driver: bridge
