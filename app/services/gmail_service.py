@@ -1,12 +1,15 @@
 import os
 import base64
 import pickle
+import json
 from datetime import datetime
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from bs4 import BeautifulSoup
 import logging
+from email.utils import parsedate_to_datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -22,30 +25,64 @@ def get_gmail_service():
     Returns:
         googleapiclient.discovery.Resource: Gmail API service object
     """
-    creds = None
-    credentials_path = os.getenv('GMAIL_CREDENTIALS_PATH')
-    token_path = os.getenv('GMAIL_TOKEN_PATH')
-    
-    # Check if token.json exists
-    if os.path.exists(token_path):
-        with open(token_path, 'rb') as token:
-            creds = pickle.load(token)
-    
-    # If credentials don't exist or are invalid, get new ones
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
-            creds = flow.run_local_server(port=0)
+    print("Initializing Gmail API service...")
+    try:
+        # Load credentials paths from environment variables
+        credentials_path = os.getenv('GMAIL_CREDENTIALS_PATH')
+        token_path = os.getenv('GMAIL_TOKEN_PATH')
         
-        # Save the credentials for the next run
-        with open(token_path, 'wb') as token:
-            pickle.dump(creds, token)
-    
-    # Build the Gmail service
-    service = build('gmail', 'v1', credentials=creds)
-    return service
+        print(f"Credentials path: {credentials_path}")
+        print(f"Token path: {token_path}")
+        
+        if not credentials_path or not token_path:
+            print("Missing Gmail API credentials or token path")
+            logger.error("Missing Gmail API credentials or token path")
+            return None
+        
+        # Check if the credentials file exists
+        if not os.path.exists(credentials_path):
+            print(f"Credentials file not found at {credentials_path}")
+            logger.error(f"Credentials file not found at {credentials_path}")
+            return None
+            
+        # Create token directory if it doesn't exist
+        token_dir = os.path.dirname(token_path)
+        if not os.path.exists(token_dir):
+            print(f"Creating token directory: {token_dir}")
+            os.makedirs(token_dir)
+            
+        # The file token.json stores the user's access and refresh tokens
+        creds = None
+        if os.path.exists(token_path):
+            print("Loading existing token...")
+            creds = Credentials.from_authorized_user_info(json.load(open(token_path)))
+        
+        # If there are no (valid) credentials available, let the user log in
+        if not creds or not creds.valid:
+            print("Token not found or invalid, authenticating...")
+            if creds and creds.expired and creds.refresh_token:
+                print("Refreshing expired token...")
+                creds.refresh(Request())
+            else:
+                print("Getting new token...")
+                flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
+                creds = flow.run_local_server(port=0)
+            
+            # Save the credentials for the next run
+            with open(token_path, 'w') as token:
+                print("Saving token...")
+                token.write(creds.to_json())
+        
+        # Build the Gmail API service
+        print("Building Gmail API service...")
+        service = build('gmail', 'v1', credentials=creds)
+        print("Gmail API service initialized successfully")
+        return service
+        
+    except Exception as e:
+        print(f"Error initializing Gmail API service: {e}")
+        logger.error(f"Error initializing Gmail API service: {e}")
+        return None
 
 def fetch_new_emails(service, user_id='me', query='', start_date=None):
     """
@@ -60,34 +97,31 @@ def fetch_new_emails(service, user_id='me', query='', start_date=None):
     Returns:
         list: List of email dictionaries with 'id', 'subject', 'sender', 'date', and 'body'
     """
+    print(f"Fetching emails with query: '{query}', start_date: {start_date}")
     try:
-        # If start_date is provided, add it to the query
+        # Add date filter to query if start_date is provided
         if start_date:
-            # Format date as YYYY/MM/DD for Gmail query
             formatted_date = start_date.strftime('%Y/%m/%d')
             date_query = f"after:{formatted_date}"
             
-            # Combine with existing query if any
             if query:
                 query = f"{query} {date_query}"
             else:
                 query = date_query
-            
-            logger.info(f"Fetching emails with query: {query}")
+                
+            print(f"Modified query with date filter: '{query}'")
         
         # Get list of messages
+        print("Executing Gmail API query...")
         results = service.users().messages().list(userId=user_id, q=query).execute()
         messages = results.get('messages', [])
         
-        if not messages:
-            logger.info("No new emails found.")
-            return []
+        print(f"Found {len(messages)} messages matching the query")
         
         emails = []
-        
         for message in messages:
-            msg_id = message['id']
-            msg = service.users().messages().get(userId=user_id, id=msg_id, format='full').execute()
+            print(f"Fetching message details for message ID: {message['id']}")
+            msg = service.users().messages().get(userId=user_id, id=message['id'], format='full').execute()
             
             # Extract headers
             headers = msg['payload']['headers']
@@ -95,19 +129,21 @@ def fetch_new_emails(service, user_id='me', query='', start_date=None):
             sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown Sender')
             date_str = next((header['value'] for header in headers if header['name'].lower() == 'date'), None)
             
+            print(f"Processing email: '{subject}' from {sender}")
+            
             # Parse date
             date = None
             if date_str:
                 try:
-                    # Try to parse the date in various formats
-                    from email.utils import parsedate_to_datetime
+                    # Try to parse the date string
                     date = parsedate_to_datetime(date_str)
                 except Exception as e:
+                    print(f"Error parsing date: {e}")
                     logger.error(f"Error parsing date: {e}")
                     date = datetime.now()
             else:
                 date = datetime.now()
-            
+                
             # Extract body
             body = extract_email_body(msg)
             
@@ -115,18 +151,23 @@ def fetch_new_emails(service, user_id='me', query='', start_date=None):
             if body and '<html' in body.lower():
                 body = clean_html_content(body)
             
+            print(f"Email body length: {len(body)} characters")
+                
+            # Add email to list
             emails.append({
-                'id': msg_id,
+                'id': message['id'],
                 'subject': subject,
                 'sender': sender,
                 'date': date,
                 'body': body
             })
-        
+            
+        print(f"Successfully processed {len(emails)} emails")
         return emails
-    
+        
     except Exception as e:
-        logger.error(f"An error occurred while fetching emails: {e}")
+        print(f"Error fetching emails: {e}")
+        logger.error(f"Error fetching emails: {e}")
         return []
 
 def extract_email_body(message):
@@ -188,5 +229,6 @@ def clean_html_content(html_content):
         return text
     
     except Exception as e:
+        print(f"Error cleaning HTML content: {e}")
         logger.error(f"Error cleaning HTML content: {e}")
         return html_content  # Return original content if cleaning fails

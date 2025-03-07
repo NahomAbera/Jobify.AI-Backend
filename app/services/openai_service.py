@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+print(f"OpenAI API key: {'*****' + os.getenv('OPENAI_API_KEY')[-4:] if os.getenv('OPENAI_API_KEY') else 'Not set'}")
 
 def classify_and_extract_email(email_content, email_date):
     """
@@ -20,80 +21,101 @@ def classify_and_extract_email(email_content, email_date):
         email_date (datetime): The date the email was sent
         
     Returns:
-        dict: Extracted information from the email or None if not job-related
+        dict: A dictionary containing the classification and extracted information
     """
     try:
-        # Format the date for the prompt
-        formatted_date = email_date.strftime('%Y-%m-%d') if email_date else datetime.now().strftime('%Y-%m-%d')
+        print("Classifying and extracting information from email...")
+        logger.info("Classifying and extracting information from email")
         
-        # Create the prompt for the LLM
+        # Format the date
+        formatted_date = email_date.strftime("%Y-%m-%d")
+        print(f"Email date: {formatted_date}")
+        
+        # Truncate email content for logging
+        truncated_content = email_content[:100] + "..." if len(email_content) > 100 else email_content
+        print(f"Email content (truncated): {truncated_content}")
+        
+        # Create the prompt
         prompt = f"""
-        You are a very careful email classifier and information extractor for a job application tracking system.
+        You are an AI assistant that analyzes job application emails. Your task is to classify the email as one of the following:
+        1. "applied" - The user has applied for a job
+        2. "rejected" - The user has been rejected for a job they applied for
+        3. "interview" - The user has been invited for an interview
+        4. "offer" - The user has received a job offer
+        5. "other" - None of the above
         
-        Your task is to analyze the following email and determine if it's related to a job application process.
-        Be very, very, very, very, very, very careful when classifying this email. If you have ANY doubt that 
-        this is job-application related, output a status of "None of These".
+        For each email, extract the following information based on its classification:
         
-        Only classify an email as job-related if it clearly falls into one of these categories:
-        1. "applied" - A confirmation that the user has applied for a job
-        2. "rejected" - A rejection notice for a job application
-        3. "interview" - An invitation to an interview or information about an interview
-        4. "offer" - A job offer
+        For "applied" emails:
+        - company_name: The name of the company the user applied to
+        - position_name: The position the user applied for
+        - application_date: The date of the application (use {formatted_date} if not specified)
+        - job_description: A brief description of the job (if available)
+        - application_method: How the application was submitted (e.g., "online portal", "email", "referral")
         
-        For any other type of email, even if it mentions jobs or careers, output "None of These".
+        For "rejected" emails:
+        - company_name: The name of the company that rejected the user
+        - position_name: The position the user was rejected for
+        - rejection_date: The date of the rejection (use {formatted_date} if not specified)
+        - reason: The reason for rejection (if available)
         
-        If the email is job-related, extract the following information in JSON format:
-        - company_name: The name of the company
-        - role: The job title or role
-        - date: {formatted_date} (use this date from the email)
-        - location: The job location (if available, otherwise null)
-        - status: One of "applied", "rejected", "interview", "offer", or "None of These"
+        For "interview" emails:
+        - company_name: The name of the company inviting for an interview
+        - position_name: The position the interview is for
+        - interview_date: The date of the interview (if available)
+        - interview_time: The time of the interview (if available)
+        - interview_location: The location of the interview (if available)
+        - interview_type: The type of interview (e.g., "phone", "video", "in-person")
+        - interview_round: The round of the interview (e.g., "first", "second", "final")
+        - interviewer_name: The name of the interviewer (if available)
         
-        If status is "interview", also include:
-        - interview_round: One of "OA" (Online Assessment), "Behavioral", "Round 1", "Round 2", "Round 3", "Round 4", "Final Round", etc.
+        For "offer" emails:
+        - company_name: The name of the company making the offer
+        - position_name: The position the offer is for
+        - offer_date: The date of the offer (use {formatted_date} if not specified)
+        - salary: The offered salary (if available)
+        - benefits: The offered benefits (if available)
+        - start_date: The proposed start date (if available)
+        - deadline: The deadline to accept the offer (if available)
         
-        If available, also include:
-        - job_id: The job ID or reference number
+        For "other" emails:
+        - summary: A brief summary of what the email is about
         
-        Here's the email content:
+        Analyze the following email and provide your classification and extracted information in JSON format:
         
         {email_content}
-        
-        Output ONLY valid JSON with no additional text.
         """
         
-        # Call OpenAI API with ChatGPT 4o-mini
+        print("Calling OpenAI API for email classification...")
+        
+        # Call OpenAI API
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts job application information from emails."},
+                {"role": "system", "content": "You are a helpful assistant that analyzes job application emails."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,  # Low temperature for more deterministic outputs
-            max_tokens=1000
+            temperature=0.2,
+            response_format={"type": "json_object"}
         )
         
-        # Extract the response content
-        result_text = response.choices[0].message.content.strip()
+        # Extract the response
+        result = json.loads(response.choices[0].message.content)
         
-        # Parse the JSON response
-        try:
-            result = json.loads(result_text)
-            
-            # Check if the email is job-related
-            if result.get('status') == 'None of These':
-                logger.info("Email classified as not job-related")
-                return None
-            
-            return result
+        print(f"OpenAI API response: {result}")
         
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing JSON response: {e}")
-            logger.error(f"Response text: {result_text}")
+        # Check if the result contains a classification
+        if 'classification' not in result:
+            print("No classification found in OpenAI response")
+            logger.warning("No classification found in OpenAI response")
             return None
-    
+        
+        # Return the result
+        return result
+        
     except Exception as e:
-        logger.error(f"Error calling OpenAI API: {e}")
+        print(f"Error classifying and extracting email: {e}")
+        logger.error(f"Error classifying and extracting email: {e}")
         return None
 
 def generate_embedding(text):
@@ -107,13 +129,27 @@ def generate_embedding(text):
         list: The embedding vector
     """
     try:
+        print("Generating embedding for text...")
+        
+        # Truncate text for logging
+        truncated_text = text[:100] + "..." if len(text) > 100 else text
+        print(f"Text (truncated): {truncated_text}")
+        
+        # Call OpenAI API
+        print("Calling OpenAI API for embedding generation...")
         response = client.embeddings.create(
-            model="text-embedding-3-large",
-            input=text
+            input=text,
+            model="text-embedding-3-large"
         )
         
-        return response.data[0].embedding
-    
+        # Extract the embedding
+        embedding = response.data[0].embedding
+        
+        print(f"Generated embedding with {len(embedding)} dimensions")
+        
+        return embedding
+        
     except Exception as e:
+        print(f"Error generating embedding: {e}")
         logger.error(f"Error generating embedding: {e}")
         return None
