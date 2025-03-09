@@ -9,7 +9,8 @@ class User(db.Model):
     first_name = db.Column(db.String(255))
     last_name = db.Column(db.String(255))
     password = db.Column(db.String(255))
-    email_parse_start_date = db.Column(db.Date, default=datetime.now().date())
+    email_parse_start_date = db.Column(db.TIMESTAMP(timezone=True), default=datetime.now)
+    emails_parsed = db.Column(db.Boolean, default=False)
     
     # Relationships
     applications = db.relationship('Application', backref='user', lazy=True)

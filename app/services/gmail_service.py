@@ -3,6 +3,7 @@ import base64
 import pickle
 import json
 from datetime import datetime
+import re
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -84,6 +85,39 @@ def get_gmail_service():
         logger.error(f"Error initializing Gmail API service: {e}")
         return None
 
+def safe_print(text):
+    """
+    Safely print text that might contain Unicode characters
+    that are not supported by the console.
+    
+    Args:
+        text (str): Text to print
+    """
+    try:
+        # Try to print normally
+        print(text)
+    except UnicodeEncodeError:
+        # If that fails, replace problematic characters
+        ascii_text = text.encode('ascii', 'replace').decode('ascii')
+        print(ascii_text)
+
+def sanitize_text(text):
+    """
+    Remove or replace problematic Unicode characters from text.
+    
+    Args:
+        text (str): Text to sanitize
+        
+    Returns:
+        str: Sanitized text
+    """
+    if not text:
+        return ""
+    
+    # Replace emoji and other problematic Unicode characters with a placeholder
+    sanitized = re.sub(r'[^\x00-\x7F]+', '[emoji]', text)
+    return sanitized
+
 def fetch_new_emails(service, user_id='me', query='', start_date=None):
     """
     Fetch new emails from Gmail.
@@ -97,7 +131,7 @@ def fetch_new_emails(service, user_id='me', query='', start_date=None):
     Returns:
         list: List of email dictionaries with 'id', 'subject', 'sender', 'date', and 'body'
     """
-    print(f"Fetching emails with query: '{query}', start_date: {start_date}")
+    safe_print(f"Fetching emails with query: '{query}', start_date: {start_date}")
     try:
         # Add date filter to query if start_date is provided
         if start_date:
@@ -109,64 +143,78 @@ def fetch_new_emails(service, user_id='me', query='', start_date=None):
             else:
                 query = date_query
                 
-            print(f"Modified query with date filter: '{query}'")
+            safe_print(f"Modified query with date filter: '{query}'")
         
         # Get list of messages
-        print("Executing Gmail API query...")
+        safe_print("Executing Gmail API query...")
         results = service.users().messages().list(userId=user_id, q=query).execute()
         messages = results.get('messages', [])
         
-        print(f"Found {len(messages)} messages matching the query")
+        safe_print(f"Found {len(messages)} messages matching the query")
         
         emails = []
         for message in messages:
-            print(f"Fetching message details for message ID: {message['id']}")
-            msg = service.users().messages().get(userId=user_id, id=message['id'], format='full').execute()
-            
-            # Extract headers
-            headers = msg['payload']['headers']
-            subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
-            sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown Sender')
-            date_str = next((header['value'] for header in headers if header['name'].lower() == 'date'), None)
-            
-            print(f"Processing email: '{subject}' from {sender}")
-            
-            # Parse date
-            date = None
-            if date_str:
-                try:
-                    # Try to parse the date string
-                    date = parsedate_to_datetime(date_str)
-                except Exception as e:
-                    print(f"Error parsing date: {e}")
-                    logger.error(f"Error parsing date: {e}")
+            try:
+                safe_print(f"Fetching message details for message ID: {message['id']}")
+                msg = service.users().messages().get(userId=user_id, id=message['id'], format='full').execute()
+                
+                # Extract headers
+                headers = msg['payload']['headers']
+                subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
+                sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown Sender')
+                date_str = next((header['value'] for header in headers if header['name'].lower() == 'date'), None)
+                
+                # Sanitize subject and sender for console output
+                safe_subject = sanitize_text(subject)
+                safe_sender = sanitize_text(sender)
+                
+                safe_print(f"Processing email: '{safe_subject}' from {safe_sender}")
+                
+                # Parse date
+                date = None
+                if date_str:
+                    try:
+                        # Try to parse the date string
+                        date = parsedate_to_datetime(date_str)
+                    except Exception as e:
+                        logger.error(f"Error parsing date: {e}")
+                        date = datetime.now()
+                else:
                     date = datetime.now()
-            else:
-                date = datetime.now()
+                    
+                # Extract body
+                body = extract_email_body(msg)
                 
-            # Extract body
-            body = extract_email_body(msg)
-            
-            # Clean HTML if body is in HTML format
-            if body and '<html' in body.lower():
-                body = clean_html_content(body)
-            
-            print(f"Email body length: {len(body)} characters")
+                # Clean HTML if body is in HTML format
+                if body and '<html' in body.lower():
+                    body = clean_html_content(body)
                 
-            # Add email to list
-            emails.append({
-                'id': message['id'],
-                'subject': subject,
-                'sender': sender,
-                'date': date,
-                'body': body
-            })
+                safe_print(f"Email body length: {len(body)} characters")
+                    
+                # Add email to list
+                emails.append({
+                    'id': message['id'],
+                    'subject': subject,
+                    'sender': sender,
+                    'date': date,
+                    'body': body
+                })
+            except UnicodeEncodeError as e:
+                logger.error(f"Unicode encoding error processing message {message['id']}: {e}")
+                # Continue to the next message
+                continue
+            except Exception as e:
+                logger.error(f"Error processing message {message['id']}: {e}")
+                # Continue to the next message
+                continue
             
-        print(f"Successfully processed {len(emails)} emails")
+        safe_print(f"Successfully processed {len(emails)} emails")
         return emails
         
+    except UnicodeEncodeError as e:
+        logger.error(f"Unicode encoding error: {e}")
+        return []
     except Exception as e:
-        print(f"Error fetching emails: {e}")
         logger.error(f"Error fetching emails: {e}")
         return []
 
@@ -180,22 +228,29 @@ def extract_email_body(message):
     Returns:
         str: Email body text
     """
-    if 'parts' in message['payload']:
-        for part in message['payload']['parts']:
-            if part['mimeType'] == 'text/plain' and 'data' in part['body']:
-                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-            elif part['mimeType'] == 'text/html' and 'data' in part['body']:
-                return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-            elif 'parts' in part:
-                for subpart in part['parts']:
-                    if subpart['mimeType'] == 'text/plain' and 'data' in subpart['body']:
-                        return base64.urlsafe_b64decode(subpart['body']['data']).decode('utf-8')
-                    elif subpart['mimeType'] == 'text/html' and 'data' in subpart['body']:
-                        return base64.urlsafe_b64decode(subpart['body']['data']).decode('utf-8')
-    elif 'body' in message['payload'] and 'data' in message['payload']['body']:
-        return base64.urlsafe_b64decode(message['payload']['body']['data']).decode('utf-8')
-    
-    return "No body content found."
+    try:
+        if 'parts' in message['payload']:
+            for part in message['payload']['parts']:
+                if part['mimeType'] == 'text/plain' and 'data' in part['body']:
+                    return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='replace')
+                elif part['mimeType'] == 'text/html' and 'data' in part['body']:
+                    return base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='replace')
+                elif 'parts' in part:
+                    for subpart in part['parts']:
+                        if subpart['mimeType'] == 'text/plain' and 'data' in subpart['body']:
+                            return base64.urlsafe_b64decode(subpart['body']['data']).decode('utf-8', errors='replace')
+                        elif subpart['mimeType'] == 'text/html' and 'data' in subpart['body']:
+                            return base64.urlsafe_b64decode(subpart['body']['data']).decode('utf-8', errors='replace')
+        elif 'body' in message['payload'] and 'data' in message['payload']['body']:
+            return base64.urlsafe_b64decode(message['payload']['body']['data']).decode('utf-8', errors='replace')
+        
+        return "No body content found."
+    except UnicodeDecodeError:
+        # If UTF-8 fails, try with errors='replace' to handle problematic characters
+        return "Email content contains characters that could not be decoded properly."
+    except Exception as e:
+        logger.error(f"Error extracting email body: {e}")
+        return "Error extracting email body."
 
 def clean_html_content(html_content):
     """
@@ -229,6 +284,5 @@ def clean_html_content(html_content):
         return text
     
     except Exception as e:
-        print(f"Error cleaning HTML content: {e}")
         logger.error(f"Error cleaning HTML content: {e}")
         return html_content  # Return original content if cleaning fails

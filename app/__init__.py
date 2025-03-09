@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
-import datetime
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +37,7 @@ def create_app():
     print(f"SECRET_KEY: {'*****' if os.getenv('SECRET_KEY') else 'Not set'}")
     print(f"DEFAULT_USER_EMAIL: {os.getenv('DEFAULT_USER_EMAIL')}")
     print(f"EMAIL_PARSER_INTERVAL_MINUTES: {os.getenv('EMAIL_PARSER_INTERVAL_MINUTES')}")
+    print(f"PINECONE_ENVIRONMENT: {os.getenv('PINECONE_ENVIRONMENT', 'Not set')}")
     
     # Configure the application
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key')
