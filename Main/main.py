@@ -19,23 +19,21 @@ import openai
 import pinecone
 import logging
 from dateutil import parser as date_parser
+import email
+from email import policy
+from email.parser import BytesParser
 
 from sqlalchemy import (create_engine, Column, String, Integer, Date, DateTime,
-                        Boolean, ForeignKey, func)
+                        Boolean, ForeignKey, func, UniqueConstraint)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
-# ============================================================
-# 1. ENV & GLOBAL INITIALISATION
-# ============================================================
-# Try to locate .env relative to CWD; if not found, fall back to repo root.
+
 dotenv_path = find_dotenv(filename=".env", usecwd=True)
 if not dotenv_path:
-    # fall back to parent of current file (repo root)
     dotenv_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path, override=False)
 
-# ---------------- Logging Setup ----------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -50,7 +48,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENV = os.getenv("PINECONE_ENVIRONMENT")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIM = 1536  # text-embedding-3-small dimension
+EMBEDDING_DIM = 1536  
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "default@example.com")
@@ -58,31 +56,25 @@ DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "default@example.com")
 GMAIL_CREDENTIALS_PATH = os.getenv("GMAIL_CREDENTIALS_PATH")
 GMAIL_TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "token.json")
 
-# Gmail OAuth scope – readonly is sufficient for parsing
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-# ============================================================
-# 2. DATABASE SET‑UP (SQLAlchemy)
-# ============================================================
 Base = declarative_base()
-
-
 class User(Base):
     __tablename__ = "user"
     email_address = Column(String(255), primary_key=True)
     first_name = Column(String(255))
     last_name = Column(String(255))
-    password = Column(String(255))  # hashed password expected
+    password = Column(String(255))  
     email_parse_start_date = Column(
             DateTime(timezone=True),
             default=lambda: datetime.fromtimestamp(0, tz=timezone.utc),
         )
-    # relationships
     applications = relationship("Application", back_populates="user")
 
 
 class Application(Base):
     __tablename__ = "applications"
+    __table_args__ = (UniqueConstraint("user_email_id", "company_name", "position_title"),)
     application_id = Column(Integer, primary_key=True, autoincrement=True)
     user_email_id = Column(String(255), ForeignKey("user.email_address"))
     company_name = Column(String(255))
@@ -103,11 +95,9 @@ class Rejection(Base):
     rejection_date = Column(Date)
 
     application = relationship("Application", back_populates="rejection")
-
-
 class Interview(Base):
     __tablename__ = "interviews"
-    id = Column(Integer, primary_key=True, autoincrement=True)  # surrogate key
+    id = Column(Integer, primary_key=True, autoincrement=True)  
     company_name = Column(String(255))
     position_title = Column(String(255))
     round = Column(String(100))
@@ -118,7 +108,6 @@ class Interview(Base):
     application_id = Column(Integer, ForeignKey("applications.application_id"))
 
     application = relationship("Application", back_populates="interviews")
-
 
 class Offer(Base):
     __tablename__ = "offers"
@@ -135,17 +124,16 @@ class Offer(Base):
     application = relationship("Application", back_populates="offers")
 
 
+class ProcessedEmail(Base):
+    __tablename__ = "processed_emails"
+    gmail_msg_id = Column(String(128), primary_key=True)
+
 logger.info("Connecting to database ...")
 engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
-# Create tables if they do not exist (idempotent)
 Base.metadata.create_all(bind=engine)
 logger.debug("Database tables verified/created")
-
-# ============================================================
-# 3. GENERAL UTILS
-# ============================================================
 
 def exponential_backoff_retry(max_attempts: int = 5, base_delay: float = 1.0):
     """Decorator for retrying a function with exp back‑off + jitter."""
@@ -165,7 +153,6 @@ def exponential_backoff_retry(max_attempts: int = 5, base_delay: float = 1.0):
                     time.sleep(delay + jitter)
         return wrapper
     return decorator
-
 
 def sanitize_string(value: Optional[str]) -> str:
     return value.replace("/", "_").replace("\\", "_") if value else "Unknown"
@@ -187,8 +174,6 @@ def truncate_email_body(body: str, max_len: int = 3000) -> str:
     return body[:max_len]
 
 
-# ---------------- Date Parsing Helper ----------------
-
 def parse_date_safe(raw_date: Optional[str]) -> Optional[date]:
     """Parse a date string from arbitrary formats to a `date` object.
 
@@ -209,10 +194,6 @@ def parse_date_safe(raw_date: Optional[str]) -> Optional[date]:
             logger.warning("Could not parse date '%s': %s", raw_date, e)
             return None
 
-# ============================================================
-# 4. GMAIL HELPERS
-# ============================================================
-
 def authenticate_gmail():
     logger.info("Authenticating Gmail ...")
     creds = None
@@ -227,7 +208,6 @@ def authenticate_gmail():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(GMAIL_CREDENTIALS_PATH, GMAIL_SCOPES)
-            # Attempt console-based flow; if unavailable, fallback to local_server without browser
             if hasattr(flow, "run_console"):
                 logger.info("Running console OAuth flow – copy URL to browser if prompted")
                 creds = flow.run_console()
@@ -246,7 +226,6 @@ def authenticate_gmail():
 def get_last_update_timestamp(session, user_email: str) -> int:
     user = session.query(User).filter_by(email_address=user_email).one_or_none()
     if not user:
-        # create user with epoch start
         user = User(email_address=user_email, email_parse_start_date=datetime.fromtimestamp(0, tz=timezone.utc))
         session.add(user)
         session.commit()
@@ -284,14 +263,14 @@ def list_gmail_messages(service, last_ts: int, current_ts: int) -> List[Dict[str
         next_page_token = response.get("nextPageToken")
         if not next_page_token:
             break
-    # fetch metadata (internalDate) so we can sort
+  
     full_messages: List[Dict[str, Any]] = []
     for msg_stub in messages:
         start_get = time.time()
         msg = service.users().messages().get(userId="me", id=msg_stub["id"], format="full").execute()
         logger.debug("[Gmail] get message id=%s (%.2fs)", msg_stub["id"], time.time() - start_get)
         full_messages.append(msg)
-    # sort ascending by internalDate
+
     full_messages.sort(key=lambda m: int(m.get("internalDate", 0)))
     logger.info("Fetched %d messages", len(full_messages))
     return full_messages
@@ -308,7 +287,7 @@ def extract_email_body(payload: Dict[str, Any]) -> Optional[str]:
                     return clean_email_content(decoded)
                 elif mime_type == "text/html":
                     return clean_html_content(decoded)
-            # recurse into nested parts
+           
             if "parts" in part:
                 nested = extract_email_body(part)
                 if nested:
@@ -320,24 +299,50 @@ def extract_email_body(payload: Dict[str, Any]) -> Optional[str]:
             return clean_email_content(decoded)
     return None
 
-# ============================================================
-# 5. OPENAI & PINECONE HELPERS
-# ============================================================
+
+def extract_body_from_raw(raw_b64: str) -> Optional[str]:
+    """Decode full RFC 2822 message in base64url and return best‑effort text body."""
+    try:
+        raw_bytes = base64.urlsafe_b64decode(raw_b64)
+        msg = BytesParser(policy=policy.default).parsebytes(raw_bytes)
+    except Exception as e:
+        logger.warning("Failed to parse raw email: %s", e)
+        return None
+
+    plain_parts = []
+    html_parts = []
+    for part in msg.walk():
+        ctype = part.get_content_type()
+        if ctype == "text/plain":
+            try:
+                plain_parts.append(part.get_content())
+            except Exception:
+                pass
+        elif ctype == "text/html":
+            try:
+                html_parts.append(part.get_content())
+            except Exception:
+                pass
+
+    if plain_parts:
+        return clean_email_content("\n".join(plain_parts))
+    if html_parts:
+        return clean_html_content("\n".join(html_parts))
+    return None
 
 @exponential_backoff_retry()
 def create_embedding(text: str) -> List[float]:
     logger.debug("Requesting OpenAI embedding (length %d chars)", len(text))
     try:
         if openai.__version__.startswith("0."):
-            # Legacy <= 0.x line
             resp = openai.Embedding.create(model=EMBEDDING_MODEL, input=text)
             emb = resp["data"][0]["embedding"]
         else:
-            from openai import OpenAI  # type: ignore
+            from openai import OpenAI  
 
             client = OpenAI()
             resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-            emb = resp.data[0].embedding  # type: ignore
+            emb = resp.data[0].embedding    
     except Exception as e:
         logger.error("OpenAI embedding failed: %s", e)
         raise
@@ -406,7 +411,7 @@ Body: (news content)
 JSON: {"status": "None of These"}
 
 Tip: If the company name is not explicitly mentioned but the sender domain is clearly corporate (e.g., *@oracle.com*), you may use the organization part ("Oracle") as company_name.
- 
+
 """
     if openai.__version__.startswith("0."):
         completion = openai.ChatCompletion.create(
@@ -416,7 +421,7 @@ Tip: If the company name is not explicitly mentioned but the sender domain is cl
         usage = completion.get("usage", {})
         content = completion["choices"][0]["message"]["content"]
     else:
-        from openai import OpenAI  # type: ignore
+        from openai import OpenAI
 
         client = OpenAI()
         completion = client.chat.completions.create(
@@ -427,10 +432,10 @@ Tip: If the company name is not explicitly mentioned but the sender domain is cl
             usage = completion.usage.model_dump() if completion.usage else {}
         except Exception:
             usage = {}
-        content = completion.choices[0].message.content  # type: ignore
+        content = completion.choices[0].message.content
 
     logger.debug("OpenAI completion latency OK – usage: %s", usage)
-    # extract JSON from assistant content
+
     try:
         first_brace = content.index("{")
         last_brace = content.rindex("}")
@@ -442,13 +447,10 @@ Tip: If the company name is not explicitly mentioned but the sender domain is cl
         return {"status": "None of These"}
 
 
-# Initialize Pinecone client with support for both v2 and v3 SDKs
 def init_pinecone():
     """Return a Pinecone `Index` instance abstracting over SDK v2/v3 differences."""
-    # -------- New / current SDK (>=6) or >=3 w/ Pinecone class --------
-    # Path 1: SDK exposes `Pinecone` class (v3‑5)
     try:
-        from pinecone import Pinecone as PineconeClient, ServerlessSpec  # type: ignore
+        from pinecone import Pinecone as PineconeClient, ServerlessSpec
 
         pc = PineconeClient(api_key=PINECONE_API_KEY)
 
@@ -461,31 +463,25 @@ def init_pinecone():
                     spec=ServerlessSpec(cloud="aws", region="us-east-1"),
                 )
             except Exception as e:
-                # Index may already exist (HTTP 409). Ignore and continue.
+               
                 logger.info("create_index failed (likely already exists): %s", e)
 
         logger.debug("Using Pinecone v3 client")
         return pc.Index(PINECONE_INDEX_NAME)
     except (ImportError, AttributeError):
-        pass  # Either no Pinecone class or import failed
-
-    # Path 2: SDK >=6 (no `Pinecone`, but provides global helpers and Index class)
+        pass  
     if hasattr(pinecone, "Index") and hasattr(pinecone, "list_indexes"):
         api_key = PINECONE_API_KEY
         if not api_key:
             raise ValueError("PINECONE_API_KEY env var is required for Pinecone")
 
-        # v6 uses global config builder
         try:
-            from pinecone import Config, ConfigBuilder  # type: ignore
+            from pinecone import Config, ConfigBuilder  
 
             cfg = ConfigBuilder(api_key=api_key).build()
-            pinecone.init(cfg) if hasattr(pinecone, "init") else None  # safe‑no‑op for v6
+            pinecone.init(cfg) if hasattr(pinecone, "init") else None   
         except Exception:
-            # If this fails just continue; most global ops work without explicit init in v6
             pass
-
-        # Create index if needed
         try:
             if PINECONE_INDEX_NAME not in pinecone.list_indexes():
                 pinecone.create_index(
@@ -498,14 +494,11 @@ def init_pinecone():
         except Exception as e:
             logger.warning("Could not create index (it may already exist or permissions issue): %s", e)
 
-        # Connect to index (host auto‑resolved)
         try:
             return pinecone.Index(PINECONE_INDEX_NAME)
         except Exception as e:
             logger.error("Failed to instantiate Pinecone.Index: %s", e)
-
-    # Path 3: legacy SDK (<=2) with init()
-    # Fallback to v2.x style client (has `init`)
+    
     if hasattr(pinecone, "init"):
         pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
         if PINECONE_INDEX_NAME not in pinecone.list_indexes():
@@ -514,16 +507,23 @@ def init_pinecone():
         logger.debug("Using Pinecone legacy client")
         return pinecone.Index(PINECONE_INDEX_NAME)
 
-    # Neither API present -> instruct user to upgrade / install correct package
     raise ImportError(
         "Unsupported Pinecone package detected – please install supported SDK (`pip install -U pinecone` or `pip install pinecone-client`)."
     )
 
-# ============================================================
-# 6. STATUS‑BASED PROCESSING
-# ============================================================
-
 def insert_application(session, user_email: str, data: Dict[str, Any]) -> Application:
+    app = (
+        session.query(Application)
+        .filter_by(
+            user_email_id=user_email,
+            company_name=data["company_name"],
+            position_title=data["role"],
+        )
+        .one_or_none()
+    )
+    if app:
+        return app
+
     app = Application(
         user_email_id=user_email,
         company_name=data["company_name"],
@@ -537,12 +537,10 @@ def insert_application(session, user_email: str, data: Dict[str, Any]) -> Applic
 
 
 def pinecone_upsert(index, namespace: str, vector: List[float], metadata: Dict[str, Any]):
-    # Clean metadata – Pinecone does not allow null values.
     clean_meta: Dict[str, Any] = {}
     for k, v in metadata.items():
         if v is None:
             continue
-        # Convert unsupported types to string
         if isinstance(v, (list, tuple)):
             clean_meta[k] = [str(x) for x in v]
         elif isinstance(v, (int, float, str, bool)):
@@ -564,14 +562,9 @@ def search_pinecone(index, namespace: str, vector: List[float], user_email: str,
     logger.debug("Querying Pinecone ns=%s top_k=%d", namespace, top_k)
     return index.query(vector=vector, top_k=top_k, namespace=namespace, filter={"user_email": {"$eq": user_email}})
 
-# ============================================================
-# 7. MAIN PIPELINE
-# ============================================================
-
-def process_messages(messages: List[Dict[str, Any]], user_email: str):
+def process_messages(service, messages: List[Dict[str, Any]], user_email: str):
     session = SessionLocal()
     index = init_pinecone()
-    # trackers for summary
     counters = {
         "applications": 0,
         "interviews": 0,
@@ -583,8 +576,12 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
         if idx % 10 == 0:
             logger.debug("Processed %d / %d messages", idx, len(messages))
         logger.debug("Processing message id=%s", msg.get("id"))
+       
+        if session.get(ProcessedEmail, msg.get("id")):
+            logger.debug("Message id=%s already processed, skipping", msg.get("id"))
+            continue
         payload = msg.get("payload", {})
-        # Log key headers for visibility
+       
         headers_map = {h.get("name"): h.get("value") for h in payload.get("headers", [])}
         logger.info(
             "Email %d/%d - From: %s | Subject: %s | Date: %s",
@@ -595,6 +592,14 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
             headers_map.get("Date", "N/A"),
         )
         body = extract_email_body(payload)
+        if not body:
+            try:
+                raw_msg = service.users().messages().get(userId="me", id=msg["id"], format="raw").execute()
+                body = extract_body_from_raw(raw_msg.get("raw", ""))
+                if body:
+                    logger.debug("Fallback raw extraction succeeded (len=%d)", len(body))
+            except Exception as e:
+                logger.warning("Raw fetch failed for id=%s: %s", msg.get("id"), e)
         subject = headers_map.get("Subject", "")
         if not body:
             continue
@@ -603,7 +608,7 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
         extraction = llm_classify_extract(combined_text)
         logger.debug("LLM extraction result: %s", extraction)
         
-        # -------- Heuristic fallback for application confirmations --------
+       
         subj_lower = headers_map.get("Subject", "").lower()
         if extraction.get("status") == "None of These" and any(
             kw in subj_lower for kw in [
@@ -614,9 +619,8 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
             ]
         ):
             extraction["status"] = "applied"
-            # Attempt simple company name inference from subject (word before first 'to' or 'in')
+          
             if not extraction.get("company_name"):
-                # e.g., "Thank you for applying to Cisco" -> company Cisco
                 import re as _re
 
                 m = _re.search(r"to ([A-Z][\w\s&.-]+)", headers_map.get("Subject", ""))
@@ -628,15 +632,12 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
         if status == "None of These":
             continue
 
-        # ensure required fields present
         foreach_required = ["company_name", "role", "date", "status"]
         if not all(extraction.get(k) for k in foreach_required):
-            continue  # skip ill‑formed
+            continue 
 
-        # generate embedding once per email
         embedding = create_embedding(combined_text)
 
-        # Processing logic per status
         if status == "applied":
             logger.info("Detected 'applied' email for %s - %s", extraction["company_name"], extraction["role"])
             app = insert_application(session, user_email, extraction)
@@ -704,6 +705,7 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
                 invitation_date=parse_date_safe(extraction.get("date")),
             )
             session.add(interview)
+            session.flush()
             session.commit()
             logger.debug("Inserted Interview for app_id=%s", app_id)
             counters["interviews"] += 1
@@ -720,7 +722,6 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
 
         elif status == "offer":
             logger.info("Detected 'offer' email")
-            # search hierarchy offer -> interview -> applications
             def search_chain(ns):
                 res = search_pinecone(index, ns, embedding, user_email)
                 return res.matches[0].metadata.get("application_id") if res.matches and res.matches[0].metadata else None
@@ -739,6 +740,7 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
                 location=extraction.get("location"),
             )
             session.add(offer)
+            session.flush()
             session.commit()
             logger.debug("Inserted Offer for app_id=%s", app_id)
             counters["offers"] += 1
@@ -752,6 +754,9 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
                 "job_id": extraction.get("job_id"),
             })
 
+        session.merge(ProcessedEmail(gmail_msg_id=msg.get("id")))
+        session.commit()
+
     session.close()
     logger.info(
         "Run summary – new Applications: %d | Interviews: %d | Rejections: %d | Offers: %d",
@@ -761,9 +766,6 @@ def process_messages(messages: List[Dict[str, Any]], user_email: str):
         counters["offers"],
     )
 
-# ============================================================
-# 8. ENTRYPOINT
-# ============================================================
 
 def main():
     user_email = DEFAULT_USER_EMAIL
@@ -772,9 +774,8 @@ def main():
 
     logger.info("Retrieving timeframe cursor from DB …")
     last_ts = get_last_update_timestamp(session, user_email)
-    # Custom bound: stop fetching emails after 31 Aug 2024 (inclusive)
     current_ts_default = int(datetime.now(tz=timezone.utc).timestamp())
-    custom_end = datetime(2024, 8, 19, tzinfo=timezone.utc)
+    custom_end = datetime(2024, 12, 31, tzinfo=timezone.utc)
     current_ts = min(current_ts_default, int(custom_end.timestamp()))
 
     logger.info("Time window: %s – %s (%d days)", datetime.fromtimestamp(last_ts, tz=timezone.utc).date(), datetime.fromtimestamp(current_ts, tz=timezone.utc).date(), max((current_ts-last_ts)//86400,0))
@@ -784,7 +785,7 @@ def main():
     try:
         messages = list_gmail_messages(service, last_ts, current_ts)
         logger.info("Returned %d messages from Gmail list", len(messages))
-        process_messages(messages, user_email)
+        process_messages(service, messages, user_email)
         update_parse_timestamp(session, user_email, current_ts)
         logger.info("Processed %d messages for %s", len(messages), user_email)
     except HttpError as e:
