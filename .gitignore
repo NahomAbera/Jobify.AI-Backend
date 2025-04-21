@@ -1,4 +1,3 @@
-credentials/credentials.json
-credentials/token.json
 .env
-venv
+credential/credentials.json
+credential/token.json
